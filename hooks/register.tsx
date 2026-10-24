@@ -1,79 +1,81 @@
 import type { Engine, Register } from 'claude-code'
 
-type Modus = (typeof MODI)[number]
+type Mode = (typeof MODES)[number]
 
-// Nimmt per screencapture auf, legt das PNG unter ~/.claude/screenshots ab,
-// kopiert es als Bild in die Zwischenablage und gibt den Pfad aus.
-// $1 = Modus: auswahl (interaktiv, Leertaste = Fenster), fenster, ganz;
-// $2 = Bildschirm-Nummer für "ganz" (screencapture -D, 1 = Hauptbildschirm).
-const SKRIPT = `
+// Captures with screencapture, saves the PNG under ~/.claude/screenshots,
+// copies it to the clipboard as an image and prints the path.
+// $1 = mode: select (interactive, space toggles window), window, screen;
+// $2 = display number for "screen" (screencapture -D, 1 = main display).
+const SCRIPT = `
 dir="$HOME/.claude/screenshots"
 mkdir -p "$dir" || exit 1
-datei="$dir/screenshot-$(date +%Y%m%d-%H%M%S).png"
+file="$dir/screenshot-$(date +%Y%m%d-%H%M%S).png"
 case "$1" in
-  fenster) fehler=$(screencapture -i -J window -x "$datei" 2>&1) ;;
-  ganz) fehler=$(screencapture -x -D "\${2:-1}" "$datei" 2>&1) ;;
-  *) fehler=$(screencapture -i -x "$datei" 2>&1) ;;
+  window) err=$(screencapture -i -J window -x "$file" 2>&1) ;;
+  screen) err=$(screencapture -x -D "\${2:-1}" "$file" 2>&1) ;;
+  *) err=$(screencapture -i -x "$file" 2>&1) ;;
 esac
-case "$fehler" in *"could not create image"*) exit 4 ;; esac
-[ -s "$datei" ] || exit 3
-osascript -e "set the clipboard to (read (POSIX file \\"$datei\\") as «class PNGf»)" >/dev/null 2>&1 || true
-printf '%s' "$datei"
+case "$err" in *"could not create image"*) exit 4 ;; esac
+[ -s "$file" ] || exit 3
+osascript -e "set the clipboard to (read (POSIX file \\"$file\\") as «class PNGf»)" >/dev/null 2>&1 || true
+printf '%s' "$file"
 `
 
-const MODI = ['auswahl', 'fenster', 'ganz'] as const
-const PFAD = /\S*\/\.claude\/screenshots\/screenshot-[\d-]+\.png/g
+const MODES = ['select', 'window', 'screen'] as const
+// German aliases, kept for the commands people already type.
+const ALIASES: Record<string, Mode> = { auswahl: 'select', fenster: 'window', ganz: 'screen' }
+const SCREENSHOT_PATH = /\S*\/\.claude\/screenshots\/screenshot-[\d-]+\.png/g
 
-// Listet die angeschlossenen Bildschirme in der Reihenfolge, die screencapture -D zählt
-// (NSScreen.screens = CGGetActiveDisplayList): je Zeile "Nummer<TAB>Name".
-const BILDSCHIRME = `ObjC.import("AppKit"); var s = $.NSScreen.screens, r = [];
+// Lists the connected displays in the order screencapture -D counts them
+// (NSScreen.screens = CGGetActiveDisplayList): one "number<TAB>name" per line.
+const DISPLAYS = `ObjC.import("AppKit"); var s = $.NSScreen.screens, r = [];
 for (var i = 0; i < s.count; i++) r.push((i + 1) + "\\t" + s.objectAtIndex(i).localizedName.js);
 r.join("\\n")`
 
-export type Bildschirm = { nr: number; name: string }
+export type Display = { nr: number; name: string }
 
-export const bildschirmeAus = (ausgabe: string): Bildschirm[] =>
-  ausgabe
+export const parseDisplays = (output: string): Display[] =>
+  output
     .split('\n')
-    .map(zeile => zeile.split('\t'))
+    .map(line => line.split('\t'))
     .filter(([nr, name]) => /^\d+$/.test(nr ?? '') && !!name)
     .map(([nr, name]) => ({ nr: Number(nr), name: name!.trim() }))
 
-export const modusAus = (args: string): { modus: Modus; nr?: number } => {
-  const [wort = '', zahl] = args.trim().toLowerCase().split(/\s+/)
-  const modus = (MODI as readonly string[]).includes(wort) ? (wort as Modus) : 'auswahl'
-  const nr = modus === 'ganz' && zahl && /^\d+$/.test(zahl) ? Number(zahl) : undefined
-  return { modus, nr }
+export const parseArgs = (args: string): { mode: Mode; nr?: number } => {
+  const [word = '', number] = args.trim().toLowerCase().split(/\s+/)
+  const mode = (MODES as readonly string[]).includes(word) ? (word as Mode) : (ALIASES[word] ?? 'select')
+  const nr = mode === 'screen' && number && /^\d+$/.test(number) ? Number(number) : undefined
+  return { mode, nr }
 }
 
-let bildschirme: Bildschirm[] = []
+let displays: Display[] = []
 
-type Ergebnis = { text: string; imFeld: boolean }
+type Result = { text: string; isInPrompt: boolean }
 
-// Nimmt auf, schreibt den Pfad in die Eingabe und sagt, was passiert ist.
-const aufnehmen = async ($: Engine, modus: Modus, nr?: number): Promise<Ergebnis> => {
-  const lauf = await $.process.run(['/bin/sh', '-c', SKRIPT, 'screenshot', modus, ...(nr ? [String(nr)] : [])], {
+// Captures, writes the path into the prompt and says what happened.
+const capture = async ($: Engine, mode: Mode, nr?: number): Promise<Result> => {
+  const run = await $.process.run(['/bin/sh', '-c', SCRIPT, 'screenshot', mode, ...(nr ? [String(nr)] : [])], {
     timeoutMs: 300_000,
   })
-  if (lauf.exitCode === 3) return { text: 'Aufnahme abgebrochen.', imFeld: false }
-  if (lauf.exitCode === 4) {
+  if (run.exitCode === 3) return { text: 'Screenshot cancelled.', isInPrompt: false }
+  if (run.exitCode === 4) {
     return {
-      imFeld: false,
+      isInPrompt: false,
       text:
-        'Aufnahme nicht erlaubt: macOS-Systemeinstellungen → Datenschutz & Sicherheit → ' +
-        '„Bildschirm- & Systemaudioaufnahme“ für Claude (bzw. dein Terminal) einschalten, App neu starten.',
+        'Screen recording not allowed: System Settings → Privacy & Security → ' +
+        '"Screen & System Audio Recording", turn it on for Claude (or your terminal), then restart the app.',
     }
   }
-  if (lauf.exitCode !== 0 || !lauf.stdout) {
-    return { text: `Aufnahme fehlgeschlagen: ${lauf.stderr.trim() || `Exit ${lauf.exitCode}`}`, imFeld: false }
+  if (run.exitCode !== 0 || !run.stdout) {
+    return { text: `Screenshot failed: ${run.stderr.trim() || `exit ${run.exitCode}`}`, isInPrompt: false }
   }
-  const pfad = lauf.stdout.trim()
-  const gefuellt = await $.prompt.fill({ text: `${pfad} `, mode: 'insert' })
+  const path = run.stdout.trim()
+  const filled = await $.prompt.fill({ text: `${path} `, mode: 'insert' })
   return {
-    imFeld: gefuellt.isFilled,
-    text: gefuellt.isFilled
-      ? `Screenshot in der Eingabe: ${pfad} (Bild liegt auch in der Zwischenablage, Cmd+V = Anhang)`
-      : `Screenshot gespeichert: ${pfad} – Bild liegt in der Zwischenablage, mit Cmd+V einfügen.`,
+    isInPrompt: filled.isFilled,
+    text: filled.isFilled
+      ? `Screenshot in the prompt: ${path} (also on the clipboard, Cmd+V attaches it)`
+      : `Screenshot saved: ${path} - it is on the clipboard, paste it with Cmd+V.`,
   }
 }
 
@@ -81,13 +83,13 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'screenshot',
-      description: 'Bildschirmausschnitt aufnehmen und in die Eingabe übernehmen (auswahl | fenster | ganz [Nr])',
-      argumentHint: 'auswahl | fenster | ganz [Bildschirm-Nr]',
+      description: 'Capture a region, window or display and put it into the prompt (select | window | screen [n])',
+      argumentHint: 'select | window | screen [display number]',
     })
     void (async () => {
-      const lauf = await $.process.run(['osascript', '-l', 'JavaScript', '-e', BILDSCHIRME])
-      if (lauf.exitCode === 0) {
-        bildschirme = bildschirmeAus(lauf.stdout)
+      const run = await $.process.run(['osascript', '-l', 'JavaScript', '-e', DISPLAYS])
+      if (run.exitCode === 0) {
+        displays = parseDisplays(run.stdout)
         $.ui.invalidate('ui.render')
       }
     })()
@@ -95,46 +97,46 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'screenshot' }, async ($, e) => {
-    const { modus, nr } = modusAus(e.args)
-    return { text: (await aufnehmen($, modus, nr)).text }
+    const { mode, nr } = parseArgs(e.args)
+    return { text: (await capture($, mode, nr)).text }
   })
 
-  // Knöpfe im Band direkt über dem Eingabefeld.
+  // Buttons in the band right above the prompt.
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Button } = $.ui.resolve(e)
-    const knopf = (key: string, label: string, modus: Modus, nr?: number) => (
+    const button = (key: string, label: string, mode: Mode, nr?: number) => (
       <Button
         key={key}
         label={label}
-        dimColor={modus !== 'auswahl'}
+        dimColor={mode !== 'select'}
         onPress={async () => {
-          const ergebnis = await aufnehmen($, modus, nr)
-          if (!ergebnis.imFeld) $.ui.toast(ergebnis.text)
+          const result = await capture($, mode, nr)
+          if (!result.isInPrompt) $.ui.toast(result.text)
         }}
       />
     )
-    const schirmKnoepfe =
-      bildschirme.length > 1
-        ? bildschirme.map(b =>
-            knopf(`ganz-${b.nr}`, `${/integriert|built-in|retina/i.test(b.name) ? '💻' : '🖥'} ${b.name}`, 'ganz', b.nr),
+    const displayButtons =
+      displays.length > 1
+        ? displays.map(d =>
+            button(`screen-${d.nr}`, `${/integriert|built-in|retina/i.test(d.name) ? '💻' : '🖥'} ${d.name}`, 'screen', d.nr),
           )
-        : [knopf('ganz', 'Ganzer Bildschirm', 'ganz')]
+        : [button('screen', 'Full screen', 'screen')]
     return (
       <Box flexDirection="row" gap={1} flexWrap="wrap">
-        {knopf('auswahl', '📸 Screenshot', 'auswahl')}
-        {knopf('fenster', 'Fenster', 'fenster')}
-        {schirmKnoepfe}
+        {button('select', '📸 Screenshot', 'select')}
+        {button('window', 'Window', 'window')}
+        {displayButtons}
       </Box>
     )
   })
 
-  // Steht ein Screenshot-Pfad im Prompt, sagt ein Kontextblock Claude, dass es
-  // ein Bild ist, das es mit dem Read-Werkzeug ansehen soll.
+  // When a screenshot path is in the prompt, a context block tells Claude it is
+  // an image to open with the Read tool.
   on('prompt.submit', ($, e, next) => {
-    const pfade = [...new Set(e.text.match(PFAD) ?? [])]
-    if (pfade.length === 0 || e.command) return next(e)
-    const hinweis = `Der Prompt enthält Bildschirmfotos (PNG): ${pfade.join(', ')}. Öffne sie mit dem Read-Werkzeug, um sie zu sehen, bevor du antwortest.`
-    return next({ ...e, context: [...(e.context ?? []), hinweis] })
+    const paths = [...new Set(e.text.match(SCREENSHOT_PATH) ?? [])]
+    if (paths.length === 0 || e.command) return next(e)
+    const hint = `The prompt contains screenshots (PNG): ${paths.join(', ')}. Open them with the Read tool to see them before you answer.`
+    return next({ ...e, context: [...(e.context ?? []), hint] })
   })
 }

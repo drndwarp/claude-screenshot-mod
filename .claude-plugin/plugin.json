@@ -1,8 +1,10 @@
 {
   "name": "screenshot",
-  "version": "0.3.0",
-  "description": "/screenshot: Bildschirmausschnitt aufnehmen, Pfad in die Eingabe, Bild in die Zwischenablage",
+  "version": "0.4.0",
+  "description": "Screenshots from a button above the prompt or /screenshot, dropped straight into Claude (macOS)",
   "author": {
     "name": "drndwarp"
-  }
+  },
+  "license": "MIT",
+  "repository": "https://github.com/drndwarp/claude-screenshot-mod"
 }
