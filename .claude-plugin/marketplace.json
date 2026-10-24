@@ -8,7 +8,7 @@
     {
       "name": "screenshot",
       "source": "./",
-      "description": "Capture a region, window or display with one click above the prompt and drop it straight into Claude (macOS)"
+      "description": "Capture a region, window or display with one click above the prompt and drop it straight into Claude (macOS, Windows)"
     }
   ]
 }

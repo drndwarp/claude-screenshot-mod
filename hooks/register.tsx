@@ -1,45 +1,16 @@
-import type { Engine, Register } from 'claude-code'
+import type { EngineInterface as Engine, Register } from 'claude-code'
+import { MODES, parseDisplays, type Backend, type Display, type Mode } from './backend'
+import { macBackend } from './mac'
+import { windowsBackend } from './windows'
 
-type Mode = (typeof MODES)[number]
+export { parseDisplays, type Display }
 
-// Captures with screencapture, saves the PNG under ~/.claude/screenshots,
-// copies it to the clipboard as an image and prints the path.
-// $1 = mode: select (interactive, space toggles window), window, screen;
-// $2 = display number for "screen" (screencapture -D, 1 = main display).
-const SCRIPT = `
-dir="$HOME/.claude/screenshots"
-mkdir -p "$dir" || exit 1
-file="$dir/screenshot-$(date +%Y%m%d-%H%M%S).png"
-case "$1" in
-  window) err=$(screencapture -i -J window -x "$file" 2>&1) ;;
-  screen) err=$(screencapture -x -D "\${2:-1}" "$file" 2>&1) ;;
-  *) err=$(screencapture -i -x "$file" 2>&1) ;;
-esac
-case "$err" in *"could not create image"*) exit 4 ;; esac
-[ -s "$file" ] || exit 3
-osascript -e "set the clipboard to (read (POSIX file \\"$file\\") as «class PNGf»)" >/dev/null 2>&1 || true
-printf '%s' "$file"
-`
-
-const MODES = ['select', 'window', 'screen'] as const
 // German aliases, kept for the commands people already type.
 const ALIASES: Record<string, Mode> = { auswahl: 'select', fenster: 'window', ganz: 'screen' }
-const SCREENSHOT_PATH = /\S*\/\.claude\/screenshots\/screenshot-[\d-]+\.png/g
-
-// Lists the connected displays in the order screencapture -D counts them
-// (NSScreen.screens = CGGetActiveDisplayList): one "number<TAB>name" per line.
-const DISPLAYS = `ObjC.import("AppKit"); var s = $.NSScreen.screens, r = [];
-for (var i = 0; i < s.count; i++) r.push((i + 1) + "\\t" + s.objectAtIndex(i).localizedName.js);
-r.join("\\n")`
-
-export type Display = { nr: number; name: string }
-
-export const parseDisplays = (output: string): Display[] =>
-  output
-    .split('\n')
-    .map(line => line.split('\t'))
-    .filter(([nr, name]) => /^\d+$/.test(nr ?? '') && !!name)
-    .map(([nr, name]) => ({ nr: Number(nr), name: name!.trim() }))
+// A screenshot path as the mod writes it: macOS or Windows separators, in
+// quotes when the path holds a space ("C:\Users\Andy M\.claude\...").
+const SCREENSHOT_FILE = String.raw`[\\/]\.claude[\\/]screenshots[\\/]screenshot-[\d-]+\.png`
+const SCREENSHOT_PATH = new RegExp(`"[^"\\n]*${SCREENSHOT_FILE}"|[^\\s"]*${SCREENSHOT_FILE}`, 'g')
 
 export const parseArgs = (args: string): { mode: Mode; nr?: number } => {
   const [word = '', number] = args.trim().toLowerCase().split(/\s+/)
@@ -48,34 +19,43 @@ export const parseArgs = (args: string): { mode: Mode; nr?: number } => {
   return { mode, nr }
 }
 
+export const screenshotPaths = (text: string): string[] => [
+  ...new Set((text.match(SCREENSHOT_PATH) ?? []).map(path => path.replace(/^"|"$/g, ''))),
+]
+
+const quoted = (path: string) => (/\s/.test(path) ? `"${path}"` : path)
+
+// Windows by its OS variable (set in every Windows process), else macOS.
+const pickBackend = async ($: Engine): Promise<Backend> => {
+  if ((await $.env.get('OS')) !== 'Windows_NT') return macBackend
+  const systemRoot = await $.env.get('SystemRoot')
+  const powershell = systemRoot ? `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe` : 'powershell.exe'
+  return windowsBackend(powershell, `${$.plugin.root}\\hooks\\capture.ps1`)
+}
+
+let backend: Promise<Backend> | undefined
 let displays: Display[] = []
+
+const getBackend = ($: Engine) => (backend ??= pickBackend($))
 
 type Result = { text: string; isInPrompt: boolean }
 
 // Captures, writes the path into the prompt and says what happened.
 const capture = async ($: Engine, mode: Mode, nr?: number): Promise<Result> => {
-  const run = await $.process.run(['/bin/sh', '-c', SCRIPT, 'screenshot', mode, ...(nr ? [String(nr)] : [])], {
-    timeoutMs: 300_000,
-  })
+  const platform = await getBackend($)
+  const run = await $.process.run(platform.capture(mode, nr), { timeoutMs: 300_000 })
   if (run.exitCode === 3) return { text: 'Screenshot cancelled.', isInPrompt: false }
-  if (run.exitCode === 4) {
-    return {
-      isInPrompt: false,
-      text:
-        'Screen recording not allowed: System Settings → Privacy & Security → ' +
-        '"Screen & System Audio Recording", turn it on for Claude (or your terminal), then restart the app.',
-    }
-  }
+  if (run.exitCode === 4) return { text: platform.notAllowed, isInPrompt: false }
   if (run.exitCode !== 0 || !run.stdout) {
     return { text: `Screenshot failed: ${run.stderr.trim() || `exit ${run.exitCode}`}`, isInPrompt: false }
   }
   const path = run.stdout.trim()
-  const filled = await $.prompt.fill({ text: `${path} `, mode: 'insert' })
+  const filled = await $.prompt.fill({ text: `${quoted(path)} `, mode: 'insert' })
   return {
     isInPrompt: filled.isFilled,
     text: filled.isFilled
-      ? `Screenshot in the prompt: ${path} (also on the clipboard, Cmd+V attaches it)`
-      : `Screenshot saved: ${path} - it is on the clipboard, paste it with Cmd+V.`,
+      ? `Screenshot in the prompt: ${path} (also on the clipboard, ${platform.pasteKey} attaches it)`
+      : `Screenshot saved: ${path} - it is on the clipboard, paste it with ${platform.pasteKey}.`,
   }
 }
 
@@ -86,9 +66,11 @@ export const register: Register = on => {
       description: 'Capture a region, window or display and put it into the prompt (select | window | screen [n])',
       argumentHint: 'select | window | screen [display number]',
     })
+    backend = undefined
     void (async () => {
-      const run = await $.process.run(['osascript', '-l', 'JavaScript', '-e', DISPLAYS])
-      if (run.exitCode === 0) {
+      const platform = await getBackend($)
+      const run = await $.process.run(platform.displays).catch(() => undefined)
+      if (run?.exitCode === 0) {
         displays = parseDisplays(run.stdout)
         $.ui.invalidate('ui.render')
       }
@@ -116,11 +98,10 @@ export const register: Register = on => {
         }}
       />
     )
+    const isBuiltIn = (d: Display) => d.isBuiltIn ?? /integriert|built-in|retina/i.test(d.name)
     const displayButtons =
       displays.length > 1
-        ? displays.map(d =>
-            button(`screen-${d.nr}`, `${/integriert|built-in|retina/i.test(d.name) ? '💻' : '🖥'} ${d.name}`, 'screen', d.nr),
-          )
+        ? displays.map(d => button(`screen-${d.nr}`, `${isBuiltIn(d) ? '💻' : '🖥'} ${d.name}`, 'screen', d.nr))
         : [button('screen', 'Full screen', 'screen')]
     return (
       <Box flexDirection="row" gap={1} flexWrap="wrap">
@@ -134,7 +115,7 @@ export const register: Register = on => {
   // When a screenshot path is in the prompt, a context block tells Claude it is
   // an image to open with the Read tool.
   on('prompt.submit', ($, e, next) => {
-    const paths = [...new Set(e.text.match(SCREENSHOT_PATH) ?? [])]
+    const paths = screenshotPaths(e.text)
     if (paths.length === 0 || e.command) return next(e)
     const hint = `The prompt contains screenshots (PNG): ${paths.join(', ')}. Open them with the Read tool to see them before you answer.`
     return next({ ...e, context: [...(e.context ?? []), hint] })

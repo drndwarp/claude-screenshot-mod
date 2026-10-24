@@ -1,7 +1,7 @@
 {
   "name": "screenshot",
-  "version": "0.4.0",
-  "description": "Screenshots from a button above the prompt or /screenshot, dropped straight into Claude (macOS)",
+  "version": "0.5.0",
+  "description": "Screenshots from a button above the prompt or /screenshot, dropped straight into Claude (macOS, Windows)",
   "author": {
     "name": "drndwarp"
   },
