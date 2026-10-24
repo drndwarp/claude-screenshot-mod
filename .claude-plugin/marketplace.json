@@ -1,0 +1,14 @@
+{
+  "name": "andy-mods",
+  "description": "Claude-Code-Mods von drndwarp",
+  "owner": {
+    "name": "drndwarp"
+  },
+  "plugins": [
+    {
+      "name": "screenshot",
+      "source": "./",
+      "description": "Screenshots per Knopf über der Eingabe oder /screenshot direkt in den Prompt übernehmen (macOS)"
+    }
+  ]
+}
