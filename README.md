@@ -3,6 +3,8 @@
 Take a screenshot with one click above Claude's prompt and drop it straight into your message,
 without a detour through Finder or the clipboard.
 
+![The screenshot buttons above the prompt in the Claude desktop app](docs/bar.png)
+
 - **📸 Screenshot** – drag a region (space switches to window mode, Esc cancels)
 - **Window** – click a window; it is captured on its own, with its shadow
 - **One button per display** (e.g. 🖥 Studio Display, 💻 Built-in Retina Display) – captures that whole display
